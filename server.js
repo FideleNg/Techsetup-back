@@ -24,39 +24,53 @@ db.connect((err) => {
   console.log('Connecté à la base de données MySQL avec succès !');
 });
 
-// ================= PRODUITS =================
+// ================= PRODUITS & SERVICES NUMÉRIQUES =================
 app.get('/api/products', (req, res) => {
-  db.query('SELECT * FROM products', (err, results) => {
+  db.query('SELECT * FROM products ORDER BY id DESC', (err, results) => {
     if (err) return res.status(500).json({ error: "Erreur serveur" });
     res.json(results);
   });
 });
 
 app.post('/api/products', (req, res) => {
-  const { name, category, price, description, image_url, stock } = req.body;
-  const productStock = stock || 10;
-  db.query('INSERT INTO products (name, category, price, description, image_url, stock) VALUES (?, ?, ?, ?, ?, ?)', 
-    [name, category, price, description, image_url, productStock], (err, result) => {
-    if (err) return res.status(500).json({ error: "Erreur ajout produit" });
-    res.status(201).json({ message: 'Produit ajouté !', productId: result.insertId });
-  });
+  const { product_type, name, category, price, description, image_url, file_url, stock } = req.body;
+  const type = product_type === 'digital' ? 'digital' : 'physical';
+  // Pour un produit numérique, le stock est illimité (999999)
+  const productStock = type === 'digital' ? 999999 : (stock || 10);
+  const digitalLink = type === 'digital' ? (file_url || null) : null;
+
+  db.query(
+    'INSERT INTO products (product_type, name, category, price, description, image_url, file_url, stock) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [type, name, category, price, description, image_url, digitalLink, productStock],
+    (err, result) => {
+      if (err) return res.status(500).json({ error: "Erreur ajout produit" });
+      res.status(201).json({ message: 'Article ajouté avec succès !', productId: result.insertId });
+    }
+  );
 });
 
 app.put('/api/products/:id', (req, res) => {
   const { id } = req.params;
-  const { name, category, price, description, image_url, stock } = req.body;
-  db.query('UPDATE products SET name = ?, category = ?, price = ?, description = ?, image_url = ?, stock = ? WHERE id = ?', 
-    [name, category, price, description, image_url, stock, id], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur modification" });
-    res.json({ message: 'Produit mis à jour !' });
-  });
+  const { product_type, name, category, price, description, image_url, file_url, stock } = req.body;
+  const type = product_type === 'digital' ? 'digital' : 'physical';
+  const productStock = type === 'digital' ? 999999 : stock;
+  const digitalLink = type === 'digital' ? (file_url || null) : null;
+
+  db.query(
+    'UPDATE products SET product_type = ?, name = ?, category = ?, price = ?, description = ?, image_url = ?, file_url = ?, stock = ? WHERE id = ?',
+    [type, name, category, price, description, image_url, digitalLink, productStock, id],
+    (err) => {
+      if (err) return res.status(500).json({ error: "Erreur modification" });
+      res.json({ message: 'Article mis à jour !' });
+    }
+  );
 });
 
 app.delete('/api/products/:id', (req, res) => {
   const { id } = req.params;
   db.query('DELETE FROM products WHERE id = ?', [id], (err) => {
     if (err) return res.status(500).json({ error: "Erreur suppression" });
-    res.json({ message: 'Produit supprimé !' });
+    res.json({ message: 'Article supprimé !' });
   });
 });
 
@@ -65,11 +79,14 @@ app.post('/api/register', async (req, res) => {
   const { name, email, password } = req.body;
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
-    db.query('INSERT INTO users (name, email, password, role, status) VALUES (?, ?, ?, "client", "active")', 
-      [name, email, hashedPassword], (err) => {
-      if (err) return res.status(500).json({ error: "Cet email est déjà utilisé." });
-      res.status(201).json({ message: 'Compte créé avec succès !' });
-    });
+    db.query(
+      'INSERT INTO users (name, email, password, role, status) VALUES (?, ?, ?, "client", "active")',
+      [name, email, hashedPassword],
+      (err) => {
+        if (err) return res.status(500).json({ error: "Cet email est déjà utilisé." });
+        res.status(201).json({ message: 'Compte créé avec succès !' });
+      }
+    );
   } catch (error) {
     res.status(500).json({ error: "Erreur serveur." });
   }
@@ -83,7 +100,7 @@ app.post('/api/login', (req, res) => {
     const user = results[0];
 
     if (user.status === 'blocked') {
-      return res.status(403).json({ 
+      return res.status(403).json({
         error: "Accès refusé : Votre compte a été suspendu ou bloqué par l'administration.",
         support: "Pour plus d'informations, veuillez contacter le Super Administrateur à support@techsetup.com ou au +243 000 000 000."
       });
@@ -129,7 +146,7 @@ app.put('/api/user/password', async (req, res) => {
   });
 });
 
-// ================= RÉSERVATIONS (10% min, délai 72h, annulation non remboursable) =================
+// ================= RÉSERVATIONS (Uniquement matériel physique) =================
 app.post('/api/reservations', (req, res) => {
   const { userId, productId, productName, totalPrice, depositPaid } = req.body;
   const priceNum = Number(totalPrice);
@@ -143,11 +160,14 @@ app.post('/api/reservations', (req, res) => {
     return res.status(400).json({ error: "L'acompte ne peut pas dépasser le prix total du produit." });
   }
 
-  db.query('SELECT stock FROM products WHERE id = ?', [productId], (err, results) => {
+  db.query('SELECT stock, product_type FROM products WHERE id = ?', [productId], (err, results) => {
     if (err || results.length === 0) return res.status(404).json({ error: "Produit introuvable." });
+    if (results[0].product_type === 'digital') {
+      return res.status(400).json({ error: "Les livres et services numériques s'achètent directement sans réservation." });
+    }
     if (results[0].stock <= 0) return res.status(400).json({ error: "Ce produit est en rupture de stock." });
 
-    const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000); // +72 heures
+    const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000);
 
     db.beginTransaction((err) => {
       if (err) return res.status(500).json({ error: "Erreur transaction." });
@@ -180,7 +200,6 @@ app.get('/api/reservations/:userId', (req, res) => {
   const { userId } = req.params;
   const now = new Date();
 
-  // Vérifier les réservations expirées (> 72h) et remettre en stock si besoin
   db.query("SELECT * FROM reservations WHERE status = 'active' AND expires_at < ?", [now], (err, expiredList) => {
     if (!err && expiredList && expiredList.length > 0) {
       expiredList.forEach((r) => {
@@ -196,7 +215,6 @@ app.get('/api/reservations/:userId', (req, res) => {
   });
 });
 
-// Route pour annuler une réservation (acompte non remboursé, stock restitué)
 app.put('/api/reservations/cancel', (req, res) => {
   const { reservationId } = req.body;
 
@@ -238,7 +256,11 @@ app.post('/api/orders', (req, res) => {
         return new Promise((resolve, reject) => {
           db.query('INSERT INTO order_items (order_id, product_name, price) VALUES (?, ?, ?)', [orderId, item.name, item.price], (err) => {
             if (err) return reject(err);
-            db.query('UPDATE products SET stock = stock - 1 WHERE id = ?', [item.id], (err) => {
+            // On ne réduit le stock que si c'est un produit physique
+            if (item.product_type === 'digital') {
+              return resolve();
+            }
+            db.query('UPDATE products SET stock = stock - 1 WHERE id = ? AND stock > 0', [item.id], (err) => {
               if (err) return reject(err);
               resolve();
             });
