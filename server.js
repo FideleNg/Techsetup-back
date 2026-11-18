@@ -82,7 +82,6 @@ app.post('/api/login', (req, res) => {
 
     const user = results[0];
 
-    // Si le compte est bloqué par l'Admin
     if (user.status === 'blocked') {
       return res.status(403).json({ 
         error: "Accès refusé : Votre compte a été suspendu ou bloqué par l'administration.",
@@ -126,6 +125,74 @@ app.put('/api/user/password', async (req, res) => {
     db.query('UPDATE users SET password = ? WHERE id = ?', [hashedNewPassword, userId], (err) => {
       if (err) return res.status(500).json({ error: "Erreur mise à jour." });
       res.json({ message: "Mot de passe mis à jour avec succès !" });
+    });
+  });
+});
+
+// ================= RÉSERVATIONS (10% min, délai 72h) =================
+app.post('/api/reservations', (req, res) => {
+  const { userId, productId, productName, totalPrice, depositPaid } = req.body;
+  const priceNum = Number(totalPrice);
+  const depositNum = Number(depositPaid);
+  const minDeposit = priceNum * 0.10;
+
+  if (depositNum < minDeposit) {
+    return res.status(400).json({ error: `L'acompte minimum requis est de 10%, soit $${minDeposit.toFixed(2)}.` });
+  }
+  if (depositNum > priceNum) {
+    return res.status(400).json({ error: "L'acompte ne peut pas dépasser le prix total du produit." });
+  }
+
+  // Vérifier le stock disponible et décrémenter
+  db.query('SELECT stock FROM products WHERE id = ?', [productId], (err, results) => {
+    if (err || results.length === 0) return res.status(404).json({ error: "Produit introuvable." });
+    if (results[0].stock <= 0) return res.status(400).json({ error: "Ce produit est en rupture de stock." });
+
+    const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000); // +72 heures
+
+    db.beginTransaction((err) => {
+      if (err) return res.status(500).json({ error: "Erreur transaction." });
+
+      db.query(
+        'INSERT INTO reservations (user_id, product_id, product_name, total_price, deposit_paid, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, productId, productName, priceNum, depositNum, expiresAt],
+        (err, result) => {
+          if (err) return db.rollback(() => res.status(500).json({ error: "Erreur lors de l'enregistrement de la réservation." }));
+
+          db.query('UPDATE products SET stock = stock - 1 WHERE id = ?', [productId], (err) => {
+            if (err) return db.rollback(() => res.status(500).json({ error: "Erreur mise à jour stock." }));
+
+            db.commit((err) => {
+              if (err) return db.rollback(() => res.status(500).json({ error: "Erreur validation." }));
+              res.status(201).json({
+                message: "Réservation confirmée ! Vous avez 72h (3 jours) pour solder le reste du montant.",
+                reservationId: result.insertId,
+                expiresAt
+              });
+            });
+          });
+        }
+      );
+    });
+  });
+});
+
+app.get('/api/reservations/:userId', (req, res) => {
+  const { userId } = req.params;
+  const now = new Date();
+
+  // Vérifier les réservations expirées (> 72h) et remettre en stock si besoin
+  db.query("SELECT * FROM reservations WHERE status = 'active' AND expires_at < ?", [now], (err, expiredList) => {
+    if (!err && expiredList && expiredList.length > 0) {
+      expiredList.forEach((r) => {
+        db.query("UPDATE reservations SET status = 'expired' WHERE id = ?", [r.id]);
+        db.query("UPDATE products SET stock = stock + 1 WHERE id = ?", [r.product_id]);
+      });
+    }
+
+    db.query('SELECT * FROM reservations WHERE user_id = ? ORDER BY created_at DESC', [userId], (err, results) => {
+      if (err) return res.status(500).json({ error: "Erreur serveur." });
+      res.json(results);
     });
   });
 });
