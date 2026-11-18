@@ -129,7 +129,7 @@ app.put('/api/user/password', async (req, res) => {
   });
 });
 
-// ================= RÉSERVATIONS (10% min, délai 72h) =================
+// ================= RÉSERVATIONS (10% min, délai 72h, annulation non remboursable) =================
 app.post('/api/reservations', (req, res) => {
   const { userId, productId, productName, totalPrice, depositPaid } = req.body;
   const priceNum = Number(totalPrice);
@@ -143,7 +143,6 @@ app.post('/api/reservations', (req, res) => {
     return res.status(400).json({ error: "L'acompte ne peut pas dépasser le prix total du produit." });
   }
 
-  // Vérifier le stock disponible et décrémenter
   db.query('SELECT stock FROM products WHERE id = ?', [productId], (err, results) => {
     if (err || results.length === 0) return res.status(404).json({ error: "Produit introuvable." });
     if (results[0].stock <= 0) return res.status(400).json({ error: "Ce produit est en rupture de stock." });
@@ -165,7 +164,7 @@ app.post('/api/reservations', (req, res) => {
             db.commit((err) => {
               if (err) return db.rollback(() => res.status(500).json({ error: "Erreur validation." }));
               res.status(201).json({
-                message: "Réservation confirmée ! Vous avez 72h (3 jours) pour solder le reste du montant.",
+                message: "Réservation confirmée ! Vous avez 72h pour solder le reste du montant.",
                 reservationId: result.insertId,
                 expiresAt
               });
@@ -193,6 +192,36 @@ app.get('/api/reservations/:userId', (req, res) => {
     db.query('SELECT * FROM reservations WHERE user_id = ? ORDER BY created_at DESC', [userId], (err, results) => {
       if (err) return res.status(500).json({ error: "Erreur serveur." });
       res.json(results);
+    });
+  });
+});
+
+// Route pour annuler une réservation (acompte non remboursé, stock restitué)
+app.put('/api/reservations/cancel', (req, res) => {
+  const { reservationId } = req.body;
+
+  db.query('SELECT * FROM reservations WHERE id = ? AND status = "active"', [reservationId], (err, results) => {
+    if (err || results.length === 0) {
+      return res.status(404).json({ error: "Réservation introuvable ou déjà traitée." });
+    }
+
+    const reservation = results[0];
+
+    db.beginTransaction((err) => {
+      if (err) return res.status(500).json({ error: "Erreur transaction." });
+
+      db.query("UPDATE reservations SET status = 'cancelled' WHERE id = ?", [reservationId], (err) => {
+        if (err) return db.rollback(() => res.status(500).json({ error: "Erreur annulation." }));
+
+        db.query("UPDATE products SET stock = stock + 1 WHERE id = ?", [reservation.product_id], (err) => {
+          if (err) return db.rollback(() => res.status(500).json({ error: "Erreur stock." }));
+
+          db.commit((err) => {
+            if (err) return db.rollback(() => res.status(500).json({ error: "Erreur validation." }));
+            res.json({ message: "Réservation annulée avec succès. Conformément aux conditions, l'acompte versé n'est pas remboursé." });
+          });
+        });
+      });
     });
   });
 });
