@@ -18,13 +18,16 @@ const db = mysql.createConnection({
 
 db.connect((err) => {
   if (err) {
-    console.error('Erreur MySQL :', err);
+    console.error('Erreur de connexion MySQL :', err);
     return;
   }
-  console.log('Connecté à MySQL avec succès !');
+  console.log('Connecté à la base de données MySQL avec succès !');
 });
 
-// ================= PRODUITS =================
+// ==========================================
+// ROUTES PRODUITS
+// ==========================================
+
 app.get('/api/products', (req, res) => {
   db.query('SELECT * FROM products', (err, results) => {
     if (err) return res.status(500).json({ error: "Erreur serveur" });
@@ -37,8 +40,8 @@ app.post('/api/products', (req, res) => {
   const productStock = stock || 10;
   db.query('INSERT INTO products (name, category, price, description, image_url, stock) VALUES (?, ?, ?, ?, ?, ?)', 
     [name, category, price, description, image_url, productStock], (err, result) => {
-    if (err) return res.status(500).json({ error: "Erreur ajout produit" });
-    res.status(201).json({ message: 'Produit ajouté !', productId: result.insertId });
+    if (err) return res.status(500).json({ error: "Erreur lors de l'ajout du produit" });
+    res.status(201).json({ message: 'Produit ajouté avec succès !', productId: result.insertId });
   });
 });
 
@@ -47,21 +50,23 @@ app.put('/api/products/:id', (req, res) => {
   const { name, category, price, description, image_url, stock } = req.body;
   db.query('UPDATE products SET name = ?, category = ?, price = ?, description = ?, image_url = ?, stock = ? WHERE id = ?', 
     [name, category, price, description, image_url, stock, id], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur modification" });
-    res.json({ message: 'Produit mis à jour !' });
+    if (err) return res.status(500).json({ error: "Erreur lors de la modification" });
+    res.json({ message: 'Produit mis à jour avec succès !' });
   });
 });
 
 app.delete('/api/products/:id', (req, res) => {
   const { id } = req.params;
   db.query('DELETE FROM products WHERE id = ?', [id], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur suppression" });
-    res.json({ message: 'Produit supprimé !' });
+    if (err) return res.status(500).json({ error: "Erreur lors de la suppression" });
+    res.json({ message: 'Produit supprimé avec succès !' });
   });
 });
 
 
-// ================= AUTHENTIFICATION & UTILISATEURS =================
+// ==========================================
+// AUTHENTIFICATION & UTILISATEURS
+// ==========================================
 
 app.post('/api/register', async (req, res) => {
   const { name, email, password } = req.body;
@@ -77,14 +82,19 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
+// Connexion avec vérification de blocage et message orienté Super Admin
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
   db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
     if (err || results.length === 0) return res.status(401).json({ error: "Email ou mot de passe incorrect." });
 
     const user = results[0];
+
     if (user.status === 'blocked') {
-      return res.status(403).json({ error: "Votre compte a été bloqué par l'administrateur." });
+      return res.status(403).json({ 
+        error: "Accès refusé : Votre compte a été suspendu ou bloqué par l'administration.",
+        support: "Pour plus d'informations ou pour contester cette décision, veuillez contacter directement le Super Administrateur à l'adresse : support@techsetup.com ou par téléphone au +243 000 000 000."
+      });
     }
 
     const match = await bcrypt.compare(password, user.password);
@@ -97,7 +107,7 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// Route "Mot de passe oublié" (Réinitialisation simple par email)
+// Route Mot de passe oublié
 app.post('/api/forgot-password', async (req, res) => {
   const { email, newPassword } = req.body;
   db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
@@ -111,7 +121,7 @@ app.post('/api/forgot-password', async (req, res) => {
   });
 });
 
-// Modification du mot de passe depuis l'espace client/admin connecté
+// Modification du mot de passe (Compte connecté)
 app.put('/api/user/password', async (req, res) => {
   const { userId, oldPassword, newPassword } = req.body;
   db.query('SELECT * FROM users WHERE id = ?', [userId], async (err, results) => {
@@ -123,35 +133,31 @@ app.put('/api/user/password', async (req, res) => {
 
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
     db.query('UPDATE users SET password = ? WHERE id = ?', [hashedNewPassword, userId], (err) => {
-      if (err) return res.status(500).json({ error: "Erreur mise à jour." });
+      if (err) return res.status(500).json({ error: "Erreur lors de la mise à jour." });
       res.json({ message: "Mot de passe mis à jour avec succès !" });
     });
   });
 });
 
 
-// ================= COMMANDES & PANIER =================
+// ==========================================
+// COMMANDES & FIDÉLITÉ
+// ==========================================
 
-// Passer une commande
 app.post('/api/orders', (req, res) => {
   const { userId, cartItems, totalAmount } = req.body;
 
   db.beginTransaction((err) => {
     if (err) return res.status(500).json({ error: "Erreur transaction" });
 
-    // 1. Insérer la commande
     db.query('INSERT INTO orders (user_id, total_amount) VALUES (?, ?)', [userId, totalAmount], (err, result) => {
-      if (err) {
-        return db.rollback(() => res.status(500).json({ error: "Erreur création commande" }));
-      }
+      if (err) return db.rollback(() => res.status(500).json({ error: "Erreur création commande" }));
       const orderId = result.insertId;
 
-      // 2. Insérer les articles et décrémenter le stock
       const itemQueries = cartItems.map(item => {
         return new Promise((resolve, reject) => {
           db.query('INSERT INTO order_items (order_id, product_name, price) VALUES (?, ?, ?)', [orderId, item.name, item.price], (err) => {
             if (err) return reject(err);
-            // Décrémenter le stock du produit
             db.query('UPDATE products SET stock = stock - 1 WHERE id = ?', [item.id], (err) => {
               if (err) return reject(err);
               resolve();
@@ -163,18 +169,17 @@ app.post('/api/orders', (req, res) => {
       Promise.all(itemQueries)
         .then(() => {
           db.commit((err) => {
-            if (err) return db.rollback(() => res.status(500).json({ error: "Erreur validation commande" }));
+            if (err) return db.rollback(() => res.status(500).json({ error: "Erreur validation" }));
             res.status(201).json({ message: "Commande validée avec succès !" });
           });
         })
-        .catch(error => {
-          db.rollback(() => res.status(500).json({ error: "Erreur traitement articles ou stock insuffisant" }));
+        .catch(() => {
+          db.rollback(() => res.status(500).json({ error: "Stock insuffisant ou erreur traitement" }));
         });
     });
   });
 });
 
-// Récupérer l'historique des commandes d'un client
 app.get('/api/orders/:userId', (req, res) => {
   const { userId } = req.params;
   db.query('SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC', [userId], (err, orders) => {
@@ -184,9 +189,10 @@ app.get('/api/orders/:userId', (req, res) => {
 });
 
 
-// ================= ESPACE ADMIN =================
+// ==========================================
+// ESPACE ADMIN
+// ==========================================
 
-// Lister les utilisateurs avec leur nombre de commandes (pour identifier les clients fidèles)
 app.get('/api/admin/users', (req, res) => {
   const query = `
     SELECT u.id, u.name, u.email, u.role, u.status, u.created_at, 
@@ -196,7 +202,7 @@ app.get('/api/admin/users', (req, res) => {
     GROUP BY u.id
   `;
   db.query(query, (err, results) => {
-    if (err) return res.status(500).json({ error: "Erreur serveur." });
+    if (err) return res.status(500).json({ error: "Erreur serveur" });
     res.json(results);
   });
 });
@@ -204,7 +210,7 @@ app.get('/api/admin/users', (req, res) => {
 app.put('/api/admin/user-role', (req, res) => {
   const { userId, newRole } = req.body;
   db.query('UPDATE users SET role = ? WHERE id = ?', [newRole, userId], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur rôle" });
+    if (err) return res.status(500).json({ error: "Erreur modification rôle" });
     res.json({ message: "Rôle mis à jour !" });
   });
 });
@@ -212,7 +218,7 @@ app.put('/api/admin/user-role', (req, res) => {
 app.put('/api/admin/user-status', (req, res) => {
   const { userId, newStatus } = req.body;
   db.query('UPDATE users SET status = ? WHERE id = ?', [newStatus, userId], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur statut" });
+    if (err) return res.status(500).json({ error: "Erreur modification statut" });
     res.json({ message: "Statut mis à jour !" });
   });
 });
