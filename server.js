@@ -24,15 +24,7 @@ db.connect((err) => {
   console.log('Connecté à la base de données MySQL avec succès !');
 });
 
-// Suivi des tentatives de connexion échouées par email
-const loginAttempts = {};
-const MAX_ATTEMPTS = 3;
-const LOCKOUT_DURATION_MS = 10000; // 10 secondes
-
-// ==========================================
-// ROUTES PRODUITS
-// ==========================================
-
+// ================= PRODUITS =================
 app.get('/api/products', (req, res) => {
   db.query('SELECT * FROM products', (err, results) => {
     if (err) return res.status(500).json({ error: "Erreur serveur" });
@@ -45,8 +37,8 @@ app.post('/api/products', (req, res) => {
   const productStock = stock || 10;
   db.query('INSERT INTO products (name, category, price, description, image_url, stock) VALUES (?, ?, ?, ?, ?, ?)', 
     [name, category, price, description, image_url, productStock], (err, result) => {
-    if (err) return res.status(500).json({ error: "Erreur lors de l'ajout du produit" });
-    res.status(201).json({ message: 'Produit ajouté avec succès !', productId: result.insertId });
+    if (err) return res.status(500).json({ error: "Erreur ajout produit" });
+    res.status(201).json({ message: 'Produit ajouté !', productId: result.insertId });
   });
 });
 
@@ -55,24 +47,20 @@ app.put('/api/products/:id', (req, res) => {
   const { name, category, price, description, image_url, stock } = req.body;
   db.query('UPDATE products SET name = ?, category = ?, price = ?, description = ?, image_url = ?, stock = ? WHERE id = ?', 
     [name, category, price, description, image_url, stock, id], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur lors de la modification" });
-    res.json({ message: 'Produit mis à jour avec succès !' });
+    if (err) return res.status(500).json({ error: "Erreur modification" });
+    res.json({ message: 'Produit mis à jour !' });
   });
 });
 
 app.delete('/api/products/:id', (req, res) => {
   const { id } = req.params;
   db.query('DELETE FROM products WHERE id = ?', [id], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur lors de la suppression" });
-    res.json({ message: 'Produit supprimé avec succès !' });
+    if (err) return res.status(500).json({ error: "Erreur suppression" });
+    res.json({ message: 'Produit supprimé !' });
   });
 });
 
-
-// ==========================================
-// AUTHENTIFICATION & UTILISATEURS
-// ==========================================
-
+// ================= AUTHENTIFICATION =================
 app.post('/api/register', async (req, res) => {
   const { name, email, password } = req.body;
   try {
@@ -87,72 +75,23 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Connexion avec gestion stricte des 3 essais et du compte à rebours 10s
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
-  const normalizedEmail = email.toLowerCase().trim();
-  const now = Date.now();
-
-  // 1. Vérifier si l'utilisateur est en période de verrouillage (10s)
-  if (loginAttempts[normalizedEmail] && loginAttempts[normalizedEmail].lockUntil > now) {
-    const remainingSeconds = Math.ceil((loginAttempts[normalizedEmail].lockUntil - now) / 1000);
-    return res.status(429).json({
-      error: `Trop de tentatives échouées. Veuillez patienter ${remainingSeconds} seconde(s) avant de réessayer.`,
-      retryAfter: remainingSeconds,
-      suggestForgot: true
-    });
-  }
-
   db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
-    if (err) return res.status(500).json({ error: "Erreur serveur." });
-    if (results.length === 0) {
-      return res.status(401).json({ error: "Aucun compte trouvé avec cet email." });
-    }
+    if (err || results.length === 0) return res.status(401).json({ error: "Email ou mot de passe incorrect." });
 
     const user = results[0];
 
-    // 2. Vérifier si le compte est bloqué par le Super Admin
+    // Si le compte est bloqué par l'Admin
     if (user.status === 'blocked') {
       return res.status(403).json({ 
         error: "Accès refusé : Votre compte a été suspendu ou bloqué par l'administration.",
-        support: "Pour plus d'informations ou pour contester cette décision, veuillez contacter directement le Super Administrateur à l'adresse support@techsetup.com ou par téléphone au +243 000 000 000."
+        support: "Pour plus d'informations, veuillez contacter le Super Administrateur à support@techsetup.com ou au +243 000 000 000."
       });
     }
 
-    // 3. Vérification du mot de passe
     const match = await bcrypt.compare(password, user.password);
-    if (!match) {
-      if (!loginAttempts[normalizedEmail] || loginAttempts[normalizedEmail].lockUntil <= now) {
-        // Initialiser si inexistant ou si le délai précédent est expiré
-        if (!loginAttempts[normalizedEmail] || loginAttempts[normalizedEmail].lockUntil <= now) {
-          loginAttempts[normalizedEmail] = { attempts: 0, lockUntil: 0 };
-        }
-      }
-
-      loginAttempts[normalizedEmail].attempts += 1;
-      const attemptsUsed = loginAttempts[normalizedEmail].attempts;
-      const remainingAttempts = MAX_ATTEMPTS - attemptsUsed;
-
-      // Si on atteint ou dépasse 3 échecs
-      if (remainingAttempts <= 0) {
-        loginAttempts[normalizedEmail].lockUntil = now + LOCKOUT_DURATION_MS;
-        loginAttempts[normalizedEmail].attempts = 0; // Reset pour le prochain cycle
-        return res.status(429).json({
-          error: "Mot de passe incorrect (3/3 essais échoués). Veuillez patienter 10 secondes avant de réessayer.",
-          retryAfter: 10,
-          suggestForgot: true
-        });
-      }
-
-      return res.status(401).json({
-        error: `Mot de passe incorrect. Réessayez (${remainingAttempts} essai${remainingAttempts > 1 ? 's' : ''} restant${remainingAttempts > 1 ? 's' : ''}).`,
-        remainingAttempts,
-        suggestForgot: true
-      });
-    }
-
-    // Succès : réinitialiser les essais
-    delete loginAttempts[normalizedEmail];
+    if (!match) return res.status(401).json({ error: "Email ou mot de passe incorrect." });
 
     res.json({
       message: 'Connexion réussie',
@@ -168,9 +107,8 @@ app.post('/api/forgot-password', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     db.query('UPDATE users SET password = ? WHERE email = ?', [hashedPassword, email], (err) => {
-      if (err) return res.status(500).json({ error: "Erreur lors de la réinitialisation." });
-      delete loginAttempts[email.toLowerCase().trim()];
-      res.json({ message: "Mot de passe réinitialisé avec succès ! Vous pouvez vous connecter." });
+      if (err) return res.status(500).json({ error: "Erreur réinitialisation." });
+      res.json({ message: "Mot de passe réinitialisé avec succès !" });
     });
   });
 });
@@ -186,27 +124,20 @@ app.put('/api/user/password', async (req, res) => {
 
     const hashedNewPassword = await bcrypt.hash(newPassword, 10);
     db.query('UPDATE users SET password = ? WHERE id = ?', [hashedNewPassword, userId], (err) => {
-      if (err) return res.status(500).json({ error: "Erreur lors de la mise à jour." });
+      if (err) return res.status(500).json({ error: "Erreur mise à jour." });
       res.json({ message: "Mot de passe mis à jour avec succès !" });
     });
   });
 });
 
-
-// ==========================================
-// COMMANDES & FIDÉLITÉ
-// ==========================================
-
+// ================= COMMANDES & ADMIN =================
 app.post('/api/orders', (req, res) => {
   const { userId, cartItems, totalAmount } = req.body;
-
   db.beginTransaction((err) => {
     if (err) return res.status(500).json({ error: "Erreur transaction" });
-
     db.query('INSERT INTO orders (user_id, total_amount) VALUES (?, ?)', [userId, totalAmount], (err, result) => {
-      if (err) return db.rollback(() => res.status(500).json({ error: "Erreur création commande" }));
+      if (err) return db.rollback(() => res.status(500).json({ error: "Erreur commande" }));
       const orderId = result.insertId;
-
       const itemQueries = cartItems.map(item => {
         return new Promise((resolve, reject) => {
           db.query('INSERT INTO order_items (order_id, product_name, price) VALUES (?, ?, ?)', [orderId, item.name, item.price], (err) => {
@@ -218,17 +149,14 @@ app.post('/api/orders', (req, res) => {
           });
         });
       });
-
       Promise.all(itemQueries)
         .then(() => {
           db.commit((err) => {
             if (err) return db.rollback(() => res.status(500).json({ error: "Erreur validation" }));
-            res.status(201).json({ message: "Commande validée avec succès !" });
+            res.status(201).json({ message: "Commande validée !" });
           });
         })
-        .catch(() => {
-          db.rollback(() => res.status(500).json({ error: "Stock insuffisant ou erreur traitement" }));
-        });
+        .catch(() => db.rollback(() => res.status(500).json({ error: "Stock insuffisant" })));
     });
   });
 });
@@ -240,11 +168,6 @@ app.get('/api/orders/:userId', (req, res) => {
     res.json(orders);
   });
 });
-
-
-// ==========================================
-// ESPACE ADMIN
-// ==========================================
 
 app.get('/api/admin/users', (req, res) => {
   const query = `
@@ -263,7 +186,7 @@ app.get('/api/admin/users', (req, res) => {
 app.put('/api/admin/user-role', (req, res) => {
   const { userId, newRole } = req.body;
   db.query('UPDATE users SET role = ? WHERE id = ?', [newRole, userId], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur modification rôle" });
+    if (err) return res.status(500).json({ error: "Erreur rôle" });
     res.json({ message: "Rôle mis à jour !" });
   });
 });
@@ -271,11 +194,9 @@ app.put('/api/admin/user-role', (req, res) => {
 app.put('/api/admin/user-status', (req, res) => {
   const { userId, newStatus } = req.body;
   db.query('UPDATE users SET status = ? WHERE id = ?', [newStatus, userId], (err) => {
-    if (err) return res.status(500).json({ error: "Erreur modification statut" });
+    if (err) return res.status(500).json({ error: "Erreur statut" });
     res.json({ message: "Statut mis à jour !" });
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`Serveur démarré sur le port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Serveur démarré sur le port ${PORT}`));
