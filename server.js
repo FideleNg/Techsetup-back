@@ -87,13 +87,13 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Connexion avec limite de 3 essais, compte à rebours 10s et blocage Super Admin
+// Connexion avec gestion stricte des 3 essais et du compte à rebours 10s
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
   const normalizedEmail = email.toLowerCase().trim();
   const now = Date.now();
 
-  // 1. Vérifier si l'email est actuellement sous compte à rebours (10 secondes)
+  // 1. Vérifier si l'utilisateur est en période de verrouillage (10s)
   if (loginAttempts[normalizedEmail] && loginAttempts[normalizedEmail].lockUntil > now) {
     const remainingSeconds = Math.ceil((loginAttempts[normalizedEmail].lockUntil - now) / 1000);
     return res.status(429).json({
@@ -119,21 +119,24 @@ app.post('/api/login', (req, res) => {
       });
     }
 
-    // 3. Vérifier le mot de passe
+    // 3. Vérification du mot de passe
     const match = await bcrypt.compare(password, user.password);
     if (!match) {
       if (!loginAttempts[normalizedEmail] || loginAttempts[normalizedEmail].lockUntil <= now) {
-        loginAttempts[normalizedEmail] = { count: 0, lockUntil: 0 };
+        // Initialiser si inexistant ou si le délai précédent est expiré
+        if (!loginAttempts[normalizedEmail] || loginAttempts[normalizedEmail].lockUntil <= now) {
+          loginAttempts[normalizedEmail] = { attempts: 0, lockUntil: 0 };
+        }
       }
 
-      loginAttempts[normalizedEmail].count += 1;
-      const attemptsUsed = loginAttempts[normalizedEmail].count;
+      loginAttempts[normalizedEmail].attempts += 1;
+      const attemptsUsed = loginAttempts[normalizedEmail].attempts;
       const remainingAttempts = MAX_ATTEMPTS - attemptsUsed;
 
-      // Si les 3 essais sont épuisés -> déclencher le blocage de 10 secondes
+      // Si on atteint ou dépasse 3 échecs
       if (remainingAttempts <= 0) {
         loginAttempts[normalizedEmail].lockUntil = now + LOCKOUT_DURATION_MS;
-        loginAttempts[normalizedEmail].count = 0; // Réinitialise pour après le compte à rebours
+        loginAttempts[normalizedEmail].attempts = 0; // Reset pour le prochain cycle
         return res.status(429).json({
           error: "Mot de passe incorrect (3/3 essais échoués). Veuillez patienter 10 secondes avant de réessayer.",
           retryAfter: 10,
@@ -148,7 +151,7 @@ app.post('/api/login', (req, res) => {
       });
     }
 
-    // Connexion réussie : réinitialiser le compteur d'échecs
+    // Succès : réinitialiser les essais
     delete loginAttempts[normalizedEmail];
 
     res.json({
