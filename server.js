@@ -24,6 +24,11 @@ db.connect((err) => {
   console.log('Connecté à la base de données MySQL avec succès !');
 });
 
+// Suivi des tentatives de connexion échouées par email
+const loginAttempts = {};
+const MAX_ATTEMPTS = 3;
+const LOCKOUT_DURATION_MS = 10000; // 10 secondes
+
 // ==========================================
 // ROUTES PRODUITS
 // ==========================================
@@ -82,23 +87,69 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Connexion avec vérification de blocage et message orienté Super Admin
+// Connexion avec limite de 3 essais, compte à rebours 10s et blocage Super Admin
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
+  const normalizedEmail = email.toLowerCase().trim();
+  const now = Date.now();
+
+  // 1. Vérifier si l'email est actuellement sous compte à rebours (10 secondes)
+  if (loginAttempts[normalizedEmail] && loginAttempts[normalizedEmail].lockUntil > now) {
+    const remainingSeconds = Math.ceil((loginAttempts[normalizedEmail].lockUntil - now) / 1000);
+    return res.status(429).json({
+      error: `Trop de tentatives échouées. Veuillez patienter ${remainingSeconds} seconde(s) avant de réessayer.`,
+      retryAfter: remainingSeconds,
+      suggestForgot: true
+    });
+  }
+
   db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
-    if (err || results.length === 0) return res.status(401).json({ error: "Email ou mot de passe incorrect." });
+    if (err) return res.status(500).json({ error: "Erreur serveur." });
+    if (results.length === 0) {
+      return res.status(401).json({ error: "Aucun compte trouvé avec cet email." });
+    }
 
     const user = results[0];
 
+    // 2. Vérifier si le compte est bloqué par le Super Admin
     if (user.status === 'blocked') {
       return res.status(403).json({ 
         error: "Accès refusé : Votre compte a été suspendu ou bloqué par l'administration.",
-        support: "Pour plus d'informations ou pour contester cette décision, veuillez contacter directement le Super Administrateur à l'adresse : support@techsetup.com ou par téléphone au +243 000 000 000."
+        support: "Pour plus d'informations ou pour contester cette décision, veuillez contacter directement le Super Administrateur à l'adresse support@techsetup.com ou par téléphone au +243 000 000 000."
       });
     }
 
+    // 3. Vérifier le mot de passe
     const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(401).json({ error: "Email ou mot de passe incorrect." });
+    if (!match) {
+      if (!loginAttempts[normalizedEmail] || loginAttempts[normalizedEmail].lockUntil <= now) {
+        loginAttempts[normalizedEmail] = { count: 0, lockUntil: 0 };
+      }
+
+      loginAttempts[normalizedEmail].count += 1;
+      const attemptsUsed = loginAttempts[normalizedEmail].count;
+      const remainingAttempts = MAX_ATTEMPTS - attemptsUsed;
+
+      // Si les 3 essais sont épuisés -> déclencher le blocage de 10 secondes
+      if (remainingAttempts <= 0) {
+        loginAttempts[normalizedEmail].lockUntil = now + LOCKOUT_DURATION_MS;
+        loginAttempts[normalizedEmail].count = 0; // Réinitialise pour après le compte à rebours
+        return res.status(429).json({
+          error: "Mot de passe incorrect (3/3 essais échoués). Veuillez patienter 10 secondes avant de réessayer.",
+          retryAfter: 10,
+          suggestForgot: true
+        });
+      }
+
+      return res.status(401).json({
+        error: `Mot de passe incorrect. Réessayez (${remainingAttempts} essai${remainingAttempts > 1 ? 's' : ''} restant${remainingAttempts > 1 ? 's' : ''}).`,
+        remainingAttempts,
+        suggestForgot: true
+      });
+    }
+
+    // Connexion réussie : réinitialiser le compteur d'échecs
+    delete loginAttempts[normalizedEmail];
 
     res.json({
       message: 'Connexion réussie',
@@ -107,7 +158,6 @@ app.post('/api/login', (req, res) => {
   });
 });
 
-// Route Mot de passe oublié
 app.post('/api/forgot-password', async (req, res) => {
   const { email, newPassword } = req.body;
   db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
@@ -116,12 +166,12 @@ app.post('/api/forgot-password', async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     db.query('UPDATE users SET password = ? WHERE email = ?', [hashedPassword, email], (err) => {
       if (err) return res.status(500).json({ error: "Erreur lors de la réinitialisation." });
+      delete loginAttempts[email.toLowerCase().trim()];
       res.json({ message: "Mot de passe réinitialisé avec succès ! Vous pouvez vous connecter." });
     });
   });
 });
 
-// Modification du mot de passe (Compte connecté)
 app.put('/api/user/password', async (req, res) => {
   const { userId, oldPassword, newPassword } = req.body;
   db.query('SELECT * FROM users WHERE id = ?', [userId], async (err, results) => {
