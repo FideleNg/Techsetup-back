@@ -281,6 +281,34 @@ app.post('/api/forgot-password', async (req, res) => {
   }
 });
 
+app.put('/api/user/email', attachUser, async (req, res) => {
+  try {
+    const newEmail = String(req.body?.email || '').trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!newEmail || !emailRegex.test(newEmail)) {
+      return res.status(400).json({ error: 'Veuillez saisir une adresse e-mail valide.' });
+    }
+
+    const existingUser = await findUserByEmail(newEmail);
+    if (existingUser && Number(existingUser.id) !== Number(req.currentUser.id)) {
+      return res.status(409).json({ error: 'Cette adresse e-mail est déjà associée à un autre compte.' });
+    }
+
+    await pool.query('UPDATE users SET email = ? WHERE id = ?', [newEmail, req.currentUser.id]);
+    const updatedRow = await findUserById(req.currentUser.id);
+    const updatedUser = sanitizeUser(updatedRow);
+
+    return res.json({
+      message: 'Adresse e-mail mise à jour avec succès.',
+      user: updatedUser
+    });
+  } catch (err) {
+    console.error('Erreur PUT /api/user/email :', err);
+    return res.status(500).json({ error: "Erreur serveur lors de la mise à jour de l'e-mail." });
+  }
+});
+
 app.put('/api/user/password', attachUser, async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body;
